@@ -21,12 +21,16 @@ from pytools.tag import Tag, UniqueTag, tag_dataclass
 
 @tag_dataclass
 class ImplementationStrategy(Tag):
-    pass
+    """
+    See :class:`ImplementAs`.
+    """
 
 
 @tag_dataclass
 class ImplStored(ImplementationStrategy):
-    pass
+    """
+    Tagged to a :class:`pytato.Array` expression that's to be materialized.
+    """
 
 
 @tag_dataclass
@@ -42,7 +46,13 @@ class ImplDefault(ImplementationStrategy):
 @tag_dataclass
 class ImplementAs(UniqueTag):
     """
+    Records metadata to be attached to :class:`pytato.Array` to convey
+    information to a :class:`pytato.target.Target` on how its supposed to be
+    lowered to.
+
     .. attribute:: strategy
+
+        An instance of :class:`ImplementationStrategy`.
     """
 
     strategy: ImplementationStrategy

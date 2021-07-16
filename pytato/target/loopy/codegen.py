@@ -46,6 +46,7 @@ from pytato.transform import Mapper
 from pytato.scalar_expr import ScalarExpression
 from pytato.codegen import preprocess, normalize_outputs, SymbolicIndex
 from pytato.loopy import LoopyCall
+from pytato.tags import ImplementAs, ImplStored
 
 # set in doc/conf.py
 if getattr(sys, "PYTATO_BUILDING_SPHINX_DOCS", False):
@@ -357,19 +358,35 @@ class CodeGenMapper(Mapper):
         if expr in state.results:
             return state.results[expr]
 
-        # TODO: Respect tags.
-
         prstnt_ctx = PersistentExpressionContext(state)
         local_ctx = LocalExpressionContext(local_namespace=expr.bindings,
                                               num_indices=expr.ndim,
                                               reduction_bounds={})
         loopy_expr = self.exprgen_mapper(expr.expr, prstnt_ctx, local_ctx)
 
-        result = InlinedResult(loopy_expr, expr.ndim, prstnt_ctx.depends_on)
-        state.results[expr] = result
+        result: ImplementedResult = InlinedResult(loopy_expr,
+                                                  expr.ndim,
+                                                  prstnt_ctx.depends_on)
 
         shape_to_scalar_expression(expr.shape, self, state)  # walk over size params
 
+        # {{{ implementation tag
+
+        impl_tags = expr.tags_of_type(ImplementAs)
+        if impl_tags:
+            impl_tag, = impl_tags
+            assert isinstance(impl_tag, ImplementAs)
+            if isinstance(impl_tag.strategy, ImplStored):
+                name = state.var_name_gen("_pt_temp")
+                result = StoredResult(name, expr.ndim,
+                                      frozenset([add_store(name, expr,
+                                                           result, state,
+                                                           self, True)]))
+        # TODO: Support more tags
+
+        # }}}
+
+        state.results[expr] = result
         return result
 
     def map_dict_of_named_arrays(self, expr: DictOfNamedArrays,
