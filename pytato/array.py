@@ -85,16 +85,6 @@ Concrete Array Data
 
 .. autoclass:: DataInterface
 
-Pre-Defined Tags
-----------------
-
-.. autoclass:: ImplementAs
-.. autoclass:: ImplementationStrategy
-.. autoclass:: CountNamed
-.. autoclass:: ImplStored
-.. autoclass:: ImplInlined
-.. autoclass:: ImplDefault
-
 Built-in Expression Nodes
 -------------------------
 
@@ -166,7 +156,7 @@ import numpy as np
 import pymbolic.primitives as prim
 from pymbolic import var
 from pytools import memoize_method
-from pytools.tag import Tag, Taggable, UniqueTag, TagsType, tag_dataclass
+from pytools.tag import Taggable, UniqueTag, TagsType, tag_dataclass
 
 from pytato.scalar_expr import (ScalarType, SCALAR_CLASSES,
                                 ScalarExpression)
@@ -653,39 +643,6 @@ class _SuppliedShapeAndDtypeMixin(object):
     @property
     def dtype(self) -> np.dtype[Any]:
         return self._dtype
-
-# }}}
-
-
-# {{{ pre-defined tag: ImplementAs
-
-@tag_dataclass
-class ImplementationStrategy(Tag):
-    pass
-
-
-@tag_dataclass
-class ImplStored(ImplementationStrategy):
-    pass
-
-
-@tag_dataclass
-class ImplInlined(ImplementationStrategy):
-    pass
-
-
-@tag_dataclass
-class ImplDefault(ImplementationStrategy):
-    pass
-
-
-@tag_dataclass
-class ImplementAs(UniqueTag):
-    """
-    .. attribute:: strategy
-    """
-
-    strategy: ImplementationStrategy
 
 # }}}
 
