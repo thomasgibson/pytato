@@ -47,6 +47,7 @@ from pytato.scalar_expr import ScalarExpression
 from pytato.codegen import preprocess, normalize_outputs, SymbolicIndex
 from pytato.loopy import LoopyCall
 from pytato.tags import ImplementAs, ImplStored
+from loopy.symbolic import DependencyMapper as LoopyDependencyMapper
 
 # set in doc/conf.py
 if getattr(sys, "PYTATO_BUILDING_SPHINX_DOCS", False):
@@ -78,6 +79,20 @@ def loopy_substitute(expression: Any, variable_assigments: Mapping[str, Any]) ->
     from loopy.symbolic import SubstitutionMapper
     from pymbolic.mapper.substitutor import make_subst_func
     return SubstitutionMapper(make_subst_func(variable_assigments))(expression)
+
+
+class LoopyPytatoDependencyMapper(scalar_expr.DependencyMapper,
+                                  LoopyDependencyMapper):
+    pass
+
+
+def get_result_expr_deps(expression: Any,
+                         include_idx_lambda_indices: bool = True
+                         ) -> FrozenSet[str]:
+    mapper = LoopyPytatoDependencyMapper(
+            composite_leaves=False,
+            include_idx_lambda_indices=include_idx_lambda_indices)
+    return frozenset(dep.name for dep in mapper(expression))
 
 
 # SymbolicIndex and ShapeType are semantically distinct but identical at the
@@ -376,7 +391,8 @@ class CodeGenMapper(Mapper):
         if impl_tags:
             impl_tag, = impl_tags
             assert isinstance(impl_tag, ImplementAs)
-            if isinstance(impl_tag.strategy, ImplStored):
+            if (isinstance(impl_tag.strategy, ImplStored)
+                    and len(get_result_expr_deps(result.expr, False)) > 1):
                 name = state.var_name_gen("_pt_temp")
                 result = StoredResult(name, expr.ndim,
                                       frozenset([add_store(name, expr,
