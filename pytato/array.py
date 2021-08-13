@@ -248,7 +248,7 @@ def normalize_shape(
 
 # {{{ array inteface
 
-SliceItem = Union[int, slice, None, EllipsisType]
+SliceItem = Union[int, slice, "Array", None, EllipsisType]
 DtypeOrScalar = Union[_dtype_any, ScalarType]
 ArrayOrScalar = Union["Array", ScalarType]
 
@@ -389,85 +389,17 @@ class Array(Taggable):
 
     def __getitem__(self,
             slice_spec: Union[SliceItem, Tuple[SliceItem, ...]]) -> Array:
+        """
+        .. warning::
+
+            Out-of-bound accesses via :class:`Array` indices is undefined
+            behavior and may pass silently.
+        """
         if not isinstance(slice_spec, tuple):
             slice_spec = (slice_spec,)
 
-        # FIXME: This doesn't support all NumPy basic indexing constructs,
-        # including:
-        #
-        # - newaxis
-        # - Ellipsis
-        # - slices with nontrivial strides
-        # - slices with bounds that exceed array dimensions
-        # - slices with negative indices
-        # - slices that yield an array with a zero dimension (lacks codegen support)
-        #
-        # Symbolic expression support is also limited.
-
-        starts = []
-        stops = []
-        kept_dims = []
-
-        slice_spec_expanded = []
-
-        for elem in slice_spec:
-            if elem is Ellipsis:
-                raise NotImplementedError("'...' is unsupported")
-            elif elem is None:
-                raise NotImplementedError("newaxis is unsupported")
-            else:
-                assert isinstance(elem, (int, slice))
-                slice_spec_expanded.append(elem)
-
-        slice_spec_expanded.extend(
-                [slice(None, None, None)] * (self.ndim - len(slice_spec)))
-
-        if len(slice_spec_expanded) > self.ndim:
-            raise IndexError("too many dimensions in index")
-
-        for i, elem in enumerate(slice_spec_expanded):
-            if isinstance(elem, slice):
-                start = elem.start
-                if start is None:
-                    start = 0
-                stop = elem.stop
-                if stop is None:
-                    stop = self.shape[i]
-                stride = elem.step
-                if stride is not None and stride != 1:
-                    raise ValueError("non-trivial strides unsupported")
-                starts.append(start)
-                stops.append(stop)
-                kept_dims.append(i)
-
-            elif isinstance(elem, int):
-                starts.append(elem)
-                stops.append(elem+1)
-
-            else:
-                raise ValueError("unknown index along dimension")
-
-        slice_ = _make_slice(self, starts, stops)
-
-        if len(kept_dims) != self.ndim:
-            # Return an IndexLambda that elides the indexed-into dimensions
-            # (as opposed to the ones that were sliced).
-            indices = [0] * self.ndim
-            shape = []
-            for i, dim in enumerate(kept_dims):
-                indices[dim] = var(f"_{i}")
-                shape.append(slice_.shape[dim])
-            expr = var("_in0")
-            if indices:
-                expr = expr[tuple(indices)]
-
-            # FIXME: Flatten into a single IndexLambda
-            return IndexLambda(expr,
-                    shape=tuple(shape),
-                    dtype=self.dtype,
-                    bindings=dict(_in0=slice_))
-        else:
-            return slice_
+        from pytato.utils import _index_into
+        return _index_into(self, slice_spec)
 
     @property
     def ndim(self) -> int:
@@ -551,6 +483,9 @@ class Array(Taggable):
 
     __sub__ = partialmethod(_binary_op, operator.sub)
     __rsub__ = partialmethod(_binary_op, operator.sub, reverse=True)
+
+    __floordiv__ = partialmethod(_binary_op, operator.floordiv)
+    __rfloordiv__ = partialmethod(_binary_op, operator.floordiv, reverse=True)
 
     __truediv__ = partialmethod(_binary_op, operator.truediv,
             get_result_type=_truediv_result_type)

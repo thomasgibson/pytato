@@ -23,15 +23,18 @@ THE SOFTWARE.
 """
 
 import numpy as np
+import islpy as isl
 import pymbolic.primitives as prim
 
-from typing import Tuple, List, Union, Callable, Any, Sequence, Dict, Optional
+from typing import (Tuple, List, Union, Callable, Any, Sequence, Dict,
+                    Optional, TypeVar, Iterable)
 from pytato.array import (Array, ShapeType, IndexLambda, SizeParam, ShapeComponent,
                           DtypeOrScalar, ArrayOrScalar)
 from pytato.scalar_expr import (ScalarExpression, IntegralScalarExpression,
                                 SCALAR_CLASSES)
 from pytools import UniqueNameGenerator
 from pytato.transform import Mapper
+from pytato.array import SliceItem
 
 
 __doc__ = """
@@ -46,13 +49,13 @@ Helper routines
 
 
 def get_shape_after_broadcasting(
-        exprs: List[Union[Array, ScalarExpression]]) -> ShapeType:
+        exprs: Sequence[Union[Array, ScalarExpression]]) -> ShapeType:
     """
     Returns the shape after broadcasting *exprs* in an operation.
     """
     shapes = [expr.shape if isinstance(expr, Array) else () for expr in exprs]
 
-    result_dim = max(len(s) for s in shapes)
+    result_dim = max((len(s) for s in shapes), default=0)
 
     # append leading dimensions of all the shapes with 1's to match result_dim.
     augmented_shapes = [((1,)*(result_dim-len(s)) + s) for s in shapes]
@@ -258,3 +261,277 @@ def are_shapes_equal(shape1: ShapeType, shape2: ShapeType) -> bool:
     return ((len(shape1) == len(shape2))
             and all(are_shape_components_equal(dim1, dim2)
                     for dim1, dim2 in zip(shape1, shape2)))
+
+
+# {{{ ShapeToISLExpressionMapper
+
+class ShapeToISLExpressionMapper(Mapper):
+    """
+    Mapper that takes a shape component and returns it as :class:`isl.Aff`.
+    """
+    def __init__(self, space: isl.Space):
+        self.cache: Dict[Array, isl.Aff] = {}
+        self.space = space
+
+    def rec(self, expr: Array) -> isl.Aff:  # type: ignore
+        if expr in self.cache:
+            return self.cache[expr]
+        result: Array = super().rec(expr)
+        self.cache[expr] = result
+        return result
+
+    def map_index_lambda(self, expr: IndexLambda) -> isl.Aff:
+        from pytato.scalar_expr import evaluate
+        return evaluate(expr.expr, {name: self.rec(val)
+                                    for name, val in expr.bindings.items()})
+
+    def map_size_param(self, expr: SizeParam) -> isl.Aff:
+        dt, pos = self.space.get_var_dict()[expr.name]
+        return isl.Aff.var_on_domain(self.space, dt, pos)
+
+
+# }}}
+
+
+def _create_size_param_space(names: Iterable[str]) -> isl.Space:
+    return isl.Space.create_from_names(isl.DEFAULT_CONTEXT,
+                                       set=[],
+                                       params=sorted(names)).params()
+
+
+def _get_size_params_assumptions_bset(space: isl.Space) -> isl.BasicSet:
+    bset = isl.BasicSet.universe(space)
+    for name in bset.get_var_dict():
+        bset = bset.add_constraint(isl.Constraint.ineq_from_names(space, {name: 1}))
+
+    return bset
+
+
+def _is_positive(expr: ShapeComponent) -> bool:
+    """
+    Returns *True* iff it can be proven that ``expr >= 0``.
+    """
+    if isinstance(expr, int):
+        return expr >= 0
+
+    assert isinstance(expr, Array)
+    from pytato.transform import InputGatherer
+    # type-ignore reason: passed Set[Optional[str]]; function expects Set[str]
+    space = _create_size_param_space({expr.name  # type: ignore
+                                      for expr in InputGatherer()(expr)})
+    aff = ShapeToISLExpressionMapper(space)(expr)
+    # type-ignore reason: mypy doesn't know comparing isl.Sets returns bool
+    return (aff.ge_set(aff * 0)  # type: ignore
+            <= _get_size_params_assumptions_bset(space))
+
+
+def _is_negative(expr: ShapeComponent) -> bool:
+    """
+    Returns *True* iff it can be proven that ``expr <= 0``.
+    """
+    if isinstance(expr, int):
+        return expr <= 0
+
+    assert isinstance(expr, Array)
+    from pytato.transform import InputGatherer
+    # type-ignore reason: passed Set[Optional[str]]; function expects Set[str]
+    space = _create_size_param_space({expr.name  # type: ignore
+                                      for expr in InputGatherer()(expr)})
+    aff = ShapeToISLExpressionMapper(space)(expr)
+    # type-ignore reason: mypy doesn't know comparing isl.Sets returns bool
+    return (aff.le_set(aff * 0)  # type: ignore
+            <= _get_size_params_assumptions_bset(space))
+
+
+# {{{ _index_into
+
+Tfind = TypeVar("Tfind")
+
+
+def _find(seq: Sequence[Tfind], key: Callable[[Tfind], bool]) -> int:
+    i = 0
+    for val in seq:
+        if key(val):
+            break
+        i += 1
+    return i
+
+
+def _normalize_slice(slice_: slice,
+                     axis_len: ShapeComponent) -> Tuple[ShapeComponent,
+                                                        ShapeComponent,
+                                                        int]:
+    start, stop, step = slice_.start, slice_.stop, slice_.step
+    if step is None:
+        step = 1
+    if not isinstance(step, int):
+        raise ValueError(f"slice step must be an int or 'None' (got a {type(step)})")
+    if step == 0:
+        raise ValueError("slice step cannot be zero")
+
+    if step > 0:
+        _DEFAULT_START_: ShapeComponent = 0  # noqa: N806
+        _DEFAULT_STOP_: ShapeComponent = axis_len  # noqa: N806
+    else:
+        _DEFAULT_START_ = axis_len - 1  # noqa: N806
+        _DEFAULT_STOP_ = -1  # noqa: N806
+
+    if start is None:
+        start = _DEFAULT_START_
+    else:
+        if isinstance(axis_len, int):
+            if -axis_len <= start < axis_len:
+                start = start % axis_len
+            else:
+                start = 0
+        else:
+            raise NotImplementedError
+
+    if stop is None:
+        stop = _DEFAULT_STOP_
+    else:
+        if isinstance(axis_len, int):
+            if -axis_len <= stop < axis_len:
+                stop = stop % axis_len
+            else:
+                stop = axis_len
+        else:
+            raise NotImplementedError
+
+    return start, stop, step
+
+
+def _index_into(ary: Array, index: Tuple[SliceItem, ...]) -> IndexLambda:
+
+    # {{{ handle ellipsis
+
+    if index.count(...) > 1:
+        raise IndexError("an index can only have a single ellipsis ('...')")
+
+    if index.count(...):
+        ellipsis_pos = index.index(...)
+        index = (index[:ellipsis_pos]
+                 + (slice(None, None, None),) * (ary.ndim - len(index) + 1)
+                 + index[ellipsis_pos+1:])
+
+    # }}}
+
+    # {{{ "pad" index with complete slices to match ary's ndim
+
+    if len(index) < ary.ndim:
+        index = index + (slice(None, None, None),) * (ary.ndim - len(index))
+
+    # }}}
+
+    if len(index) != ary.ndim:
+        raise IndexError(f"Too many indices (expected {ary.ndim}, got {len(index)})")
+
+    if any(idx is None for idx in index):
+        raise NotImplementedError("newaxis is not supported")
+
+    arys = [idx for idx in index if isinstance(idx, Array)]
+
+    try:
+        indirection_shape = get_shape_after_broadcasting(arys)
+    except ValueError as e:
+        raise IndexError(str(e))
+
+    # {{{ validate types
+
+    for idx in index:
+        if isinstance(idx, (slice, int)):
+            pass
+        elif isinstance(idx, Array):
+            if idx.dtype.kind != "i":
+                raise IndexError("only integer arrays are valid array indices")
+        else:
+            raise IndexError("only integers, slices, ellipsis and integer arrays"
+                             " are valid indices")
+
+    # }}}
+
+    vng = UniqueNameGenerator()
+    lhs_shape: List[ShapeComponent] = []
+    rhs_indices: List[ScalarExpression] = []
+    bindings = {}
+    inserted_indirection_shape = False
+    indirection_start = _find(index, lambda x: isinstance(x, Array))
+
+    # {{{ avoid reading too much into numpy-spec for uncommon cases.
+
+    # x = np.random.rand(3, 3, 3, 3)
+    # idx1 = np.array([[-1], [1]])
+    # idx2 = np.array([0, 2])
+    # (a) x[idx1, idx2, :, :] has a shape of (2, 2, 3, 3)
+    # (b) x[:, :, idx1, idx2] has a shape of (3, 3, 2, 2)
+    # (c) x[:, idx1, idx2, :] has a shape of (3, 2, 2, 3)
+    # (d) x[:, idx1, :, idx2] has a shape of (2, 2, 3, 3)
+    # Case (d)'s shape seems completely arbitrary => do not try to reverse
+    # engineer
+
+    for i in range(indirection_start, indirection_start+len(arys)):
+        if not isinstance(index[i], Array):
+            raise NotImplementedError("Non-contiguous sequences of array "
+                                      "indices is not properly defined in numpy"
+                                      "-spec.")
+
+    # }}}
+
+    for i, idx in enumerate(index):
+        axis_len = ary.shape[i]
+        if isinstance(idx, int):
+            if isinstance(axis_len, int):
+                if -axis_len <= idx < axis_len:
+                    rhs_indices.append(idx % axis_len)
+                else:
+                    raise IndexError(f"{idx} is out of bounds for axis {i}")
+            else:
+                raise NotImplementedError
+        elif isinstance(idx, slice):
+            start, stop, step = _normalize_slice(idx, ary.shape[i])
+            rhs_indices.append(start + step * prim.Variable(f"_{len(lhs_shape)}"))
+
+            if step > 0:
+                if _is_positive(stop - start):
+                    lhs_shape.append((stop - start) // step)
+                elif _is_negative(stop - start):
+                    lhs_shape.append(0)
+                else:
+                    raise NotImplementedError
+            else:
+                if _is_positive(start - stop):
+                    lhs_shape.append((start - stop) // (-step))
+                elif _is_negative(start - stop):
+                    lhs_shape.append(0)
+                else:
+                    raise NotImplementedError
+        elif isinstance(idx, Array):
+            if not inserted_indirection_shape:
+                lhs_shape += indirection_shape
+                inserted_indirection_shape = True
+
+            if isinstance(axis_len, int):
+                name = vng("in")
+                rhs_indices.append(prim.Subscript(
+                                     prim.Variable(name),
+                                     get_indexing_expression(idx.shape,
+                                                             ((1,)*indirection_start
+                                                              + indirection_shape)))
+                                   % axis_len)
+                bindings[name] = idx
+            else:
+                raise NotImplementedError
+        else:
+            raise AssertionError
+
+    name = vng("in")
+    bindings[name] = ary
+
+    return IndexLambda(expr=prim.Subscript(prim.Variable(name),
+                                           tuple(rhs_indices)),
+                       shape=tuple(lhs_shape),
+                       dtype=ary.dtype,
+                       bindings=bindings)
+
+
+# }}}
