@@ -15,6 +15,7 @@ Pre-Defined Tags
 
 
 from pytools.tag import Tag, UniqueTag, tag_dataclass
+from typing import Optional
 
 
 # {{{ pre-defined tag: ImplementAs
@@ -30,7 +31,12 @@ class ImplementationStrategy(Tag):
 class ImplStored(ImplementationStrategy):
     """
     Tagged to a :class:`pytato.Array` expression that's to be materialized.
+
+    .. attribute:: prefix
+
+        The allocated variable would bear a name prefixed-by *prefix*
     """
+    prefix: Optional[str] = None
 
 
 @tag_dataclass

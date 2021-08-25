@@ -393,7 +393,7 @@ class CodeGenMapper(Mapper):
             assert isinstance(impl_tag, ImplementAs)
             if (isinstance(impl_tag.strategy, ImplStored)
                     and len(get_result_expr_deps(result.expr, False)) > 1):
-                name = state.var_name_gen("_pt_temp")
+                name = state.var_name_gen(impl_tag.strategy.prefix or "_pt_temp")
                 result = StoredResult(name, expr.ndim,
                                       frozenset([add_store(name, expr,
                                                            result, state,
@@ -476,6 +476,7 @@ class CodeGenMapper(Mapper):
                                                                  named_array,
                                                                  self, state)
                 else:
+
                     assert arg.is_input
                     pt_arg = expr.bindings[arg.name]
                     assert isinstance(pt_arg, Array)
