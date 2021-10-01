@@ -47,7 +47,10 @@ from pytato.scalar_expr import ScalarExpression
 from pytato.codegen import preprocess, normalize_outputs, SymbolicIndex
 from pytato.loopy import LoopyCall
 from pytato.tags import ImplementAs, ImplStored
-from loopy.symbolic import DependencyMapper as LoopyDependencyMapper
+from loopy.symbolic import (
+    DependencyMapper as LoopyDependencyMapper,
+    IdentityMapper as LoopyIdentityMapper)
+from pymbolic.mapper.subst_applier import SubstitutionApplier
 
 # set in doc/conf.py
 if getattr(sys, "PYTATO_BUILDING_SPHINX_DOCS", False):
@@ -75,10 +78,12 @@ __doc__ = """
 """
 
 
+class LoopySubstitutionApplier(SubstitutionApplier, LoopyIdentityMapper):
+    pass
+
+
 def loopy_substitute(expression: Any, variable_assigments: Mapping[str, Any]) -> Any:
-    from loopy.symbolic import SubstitutionMapper
-    from pymbolic.mapper.substitutor import make_subst_func
-    return SubstitutionMapper(make_subst_func(variable_assigments))(expression)
+    return prim.Substitution(expression, *zip(*variable_assigments.items()))
 
 
 class LoopyPytatoDependencyMapper(scalar_expr.DependencyMapper,
@@ -768,7 +773,8 @@ def add_store(name: str, expr: Array, result: ImplementedResult,
             for d in range(expr.ndim))
     indices = tuple(prim.Variable(iname) for iname in inames)
     loopy_expr_context = PersistentExpressionContext(state)
-    loopy_expr = result.to_loopy_expression(indices, loopy_expr_context)
+    loopy_expr = LoopySubstitutionApplier()(
+        result.to_loopy_expression(indices, loopy_expr_context))
 
     # Make the instruction
     from loopy.kernel.instruction import make_assignment
